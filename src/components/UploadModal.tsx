@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useState, useEffect } from "react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -7,8 +7,10 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { saveNotebook, addQuestionsToNotebook, getNotebooks } from "@/lib/storage";
+import { parseTextQuestions } from "@/lib/parseTextQuestions";
 import { Question, Notebook } from "@/types/quiz";
-import { Upload, Loader2 } from "lucide-react";
+import { Upload, Loader2, CheckCircle2, AlertTriangle } from "lucide-react";
+import { Progress } from "@/components/ui/progress";
 
 interface UploadModalProps {
   isOpen: boolean;
@@ -23,56 +25,34 @@ export const UploadModal = ({ isOpen, onClose, onQuestionsLoaded }: UploadModalP
   const [isLoading, setIsLoading] = useState(false);
   const [existingNotebooks, setExistingNotebooks] = useState<Notebook[]>([]);
   const [selectedNotebook, setSelectedNotebook] = useState<string>("new");
+  const [previewCount, setPreviewCount] = useState<number | null>(null);
+  const [previewStrategy, setPreviewStrategy] = useState<string>("");
+  const [importProgress, setImportProgress] = useState(0);
+  const [importStatus, setImportStatus] = useState<"idle" | "parsing" | "saving" | "done" | "error">("idle");
 
-  const loadNotebooks = async () => {
-    const nbs = await getNotebooks();
-    setExistingNotebooks(nbs);
-  };
-
-  useState(() => {
-    if (isOpen) loadNotebooks();
-  });
-
-  const parseQuestions = (text: string): Omit<Question, "id" | "notebookId">[] => {
-    const questions: Omit<Question, "id" | "notebookId">[] = [];
-    // Simple parser: expects format like:
-    // Matéria: X
-    // 1. Question text
-    // A) option
-    // B) option
-    // C) option
-    // D) option
-    // Resposta: A
-    const blocks = text.split(/\n(?=\d+[\.\)]\s)/);
-    let currentSubject = "Geral";
-
-    for (const block of blocks) {
-      const subjectMatch = block.match(/(?:Mat[ée]ria|Assunto|Subject):\s*(.+)/i);
-      if (subjectMatch) currentSubject = subjectMatch[1].trim();
-
-      const questionMatch = block.match(/\d+[\.\)]\s*(.+?)(?=\n[A-E][\)\.])/s);
-      if (!questionMatch) continue;
-
-      const questionText = questionMatch[1].trim();
-      const optionMatches = [...block.matchAll(/([A-E])[\)\.\-]\s*(.+)/g)];
-      if (optionMatches.length < 2) continue;
-
-      const options = optionMatches.map(m => m[2].trim());
-      const answerMatch = block.match(/(?:Resposta|Gabarito|Answer|Correta):\s*([A-E])/i);
-      const correctAnswer = answerMatch ? answerMatch[1].charCodeAt(0) - 65 : 0;
-
-      const explanationMatch = block.match(/(?:Explicação|Explanation):\s*(.+)/is);
-
-      questions.push({
-        question: questionText,
-        options,
-        correctAnswer,
-        subject: currentSubject,
-        explanation: explanationMatch?.[1]?.trim(),
-      });
+  useEffect(() => {
+    if (isOpen) {
+      getNotebooks().then(setExistingNotebooks);
+      setImportStatus("idle");
+      setImportProgress(0);
+      setPreviewCount(null);
     }
-    return questions;
-  };
+  }, [isOpen]);
+
+  // Live preview: parse as user types/pastes
+  useEffect(() => {
+    if (!rawText.trim()) {
+      setPreviewCount(null);
+      setPreviewStrategy("");
+      return;
+    }
+    const timeout = setTimeout(() => {
+      const result = parseTextQuestions(rawText);
+      setPreviewCount(result.questions.length);
+      setPreviewStrategy(result.strategy);
+    }, 500);
+    return () => clearTimeout(timeout);
+  }, [rawText]);
 
   const handleImport = async () => {
     if (!rawText.trim()) {
@@ -81,20 +61,33 @@ export const UploadModal = ({ isOpen, onClose, onQuestionsLoaded }: UploadModalP
     }
 
     setIsLoading(true);
+    setImportStatus("parsing");
+    setImportProgress(10);
+
     try {
-      const parsed = parseQuestions(rawText);
-      if (parsed.length === 0) {
-        toast({ title: "Erro", description: "Não foi possível identificar questões no texto. Verifique o formato.", variant: "destructive" });
+      const result = parseTextQuestions(rawText);
+
+      if (result.questions.length === 0) {
+        toast({
+          title: "Nenhuma questão encontrada",
+          description: "Verifique se o formato está correto. Use numeração (1., 2.) e alternativas (A), B), etc).",
+          variant: "destructive",
+        });
+        setImportStatus("error");
         setIsLoading(false);
         return;
       }
 
-      let notebookId: string;
-      const questionsWithIds: Question[] = parsed.map((q, i) => ({
+      setImportProgress(40);
+      setImportStatus("saving");
+
+      const questionsWithIds: Question[] = result.questions.map((q) => ({
         ...q,
         id: crypto.randomUUID(),
         notebookId: "",
       }));
+
+      let notebookId: string;
 
       if (selectedNotebook === "new") {
         const name = notebookName.trim() || `Caderno ${new Date().toLocaleDateString("pt-BR")}`;
@@ -104,14 +97,29 @@ export const UploadModal = ({ isOpen, onClose, onQuestionsLoaded }: UploadModalP
         await addQuestionsToNotebook(notebookId, questionsWithIds);
       }
 
-      toast({ title: "Sucesso!", description: `${parsed.length} questões importadas.` });
+      setImportProgress(100);
+      setImportStatus("done");
+
+      toast({
+        title: "Importação concluída! ✅",
+        description: `${result.questions.length} questões importadas com sucesso (estratégia: ${result.strategy}).`,
+      });
+
       onQuestionsLoaded(questionsWithIds, notebookId);
-      setRawText("");
-      setNotebookName("");
-      onClose();
+
+      // Small delay to show completion
+      setTimeout(() => {
+        setRawText("");
+        setNotebookName("");
+        setImportStatus("idle");
+        setImportProgress(0);
+        setPreviewCount(null);
+        onClose();
+      }, 800);
     } catch (err) {
       console.error(err);
-      toast({ title: "Erro", description: "Falha ao importar questões.", variant: "destructive" });
+      setImportStatus("error");
+      toast({ title: "Erro", description: "Falha ao importar questões. Verifique o console.", variant: "destructive" });
     } finally {
       setIsLoading(false);
     }
@@ -124,6 +132,9 @@ export const UploadModal = ({ isOpen, onClose, onQuestionsLoaded }: UploadModalP
           <DialogTitle className="flex items-center gap-2">
             <Upload className="h-5 w-5" /> Importar Questões
           </DialogTitle>
+          <DialogDescription>
+            Cole o texto com questões numeradas e alternativas. O sistema detecta automaticamente o formato.
+          </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
@@ -150,7 +161,7 @@ export const UploadModal = ({ isOpen, onClose, onQuestionsLoaded }: UploadModalP
           <div>
             <Label>Cole as questões abaixo</Label>
             <Textarea
-              placeholder={`Matéria: Biologia\n\n1. Qual é a função do ribossomo?\nA) Síntese de proteínas\nB) Produção de energia\nC) Armazenamento\nD) Transporte\nResposta: A`}
+              placeholder={`1. Qual é a função do ribossomo?\nA) Síntese de proteínas\nB) Produção de energia\nC) Armazenamento\nD) Transporte\nResposta: A\n\n2. Próxima questão...\n\nOu inclua o GABARITO no final:\n1-A 2-B 3-C ...`}
               value={rawText}
               onChange={(e) => setRawText(e.target.value)}
               rows={12}
@@ -158,9 +169,43 @@ export const UploadModal = ({ isOpen, onClose, onQuestionsLoaded }: UploadModalP
             />
           </div>
 
+          {/* Live preview feedback */}
+          {previewCount !== null && (
+            <div className={`flex items-center gap-2 p-3 rounded-lg text-sm ${
+              previewCount > 0
+                ? "bg-green-500/10 text-green-700 dark:text-green-400 border border-green-500/20"
+                : "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400 border border-yellow-500/20"
+            }`}>
+              {previewCount > 0 ? (
+                <CheckCircle2 className="h-4 w-4 shrink-0" />
+              ) : (
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+              )}
+              <span>
+                {previewCount > 0
+                  ? `${previewCount} questão(ões) detectada(s)`
+                  : "Nenhuma questão detectada ainda. Continue colando o texto."
+                }
+              </span>
+            </div>
+          )}
+
+          {/* Import progress */}
+          {importStatus !== "idle" && (
+            <div className="space-y-2">
+              <Progress value={importProgress} className="h-2" />
+              <p className="text-xs text-muted-foreground text-center">
+                {importStatus === "parsing" && "Analisando texto..."}
+                {importStatus === "saving" && "Salvando no banco de dados..."}
+                {importStatus === "done" && "✅ Importação concluída!"}
+                {importStatus === "error" && "❌ Erro na importação"}
+              </p>
+            </div>
+          )}
+
           <Button onClick={handleImport} disabled={isLoading} className="w-full gradient-primary">
             {isLoading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Upload className="h-4 w-4 mr-2" />}
-            Importar
+            {previewCount && previewCount > 0 ? `Importar ${previewCount} questões` : "Importar"}
           </Button>
         </div>
       </DialogContent>
