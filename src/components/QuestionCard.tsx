@@ -20,6 +20,13 @@ export const QuestionCard = ({ question, questionNumber, totalQuestions, onAnswe
   const [showResult, setShowResult] = useState(question.userAnswer !== undefined);
   const [showExplanation, setShowExplanation] = useState(false);
 
+  // Reset state when question changes
+  useEffect(() => {
+    setSelectedAnswer(question.userAnswer);
+    setShowResult(question.userAnswer !== undefined);
+    setShowExplanation(false);
+  }, [question.id]);
+
   const handleSelectAnswer = (index: number) => {
     if (showResult) return;
     setSelectedAnswer(index);
@@ -28,13 +35,6 @@ export const QuestionCard = ({ question, questionNumber, totalQuestions, onAnswe
   };
 
   const isCorrect = selectedAnswer === question.correctAnswer;
-
-  // Reset state when question changes
-  useState(() => {
-    setSelectedAnswer(question.userAnswer);
-    setShowResult(question.userAnswer !== undefined);
-    setShowExplanation(false);
-  });
 
   return (
     <Card className="w-full max-w-3xl mx-auto shadow-lg">
